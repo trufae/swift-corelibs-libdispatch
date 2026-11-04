@@ -44,6 +44,7 @@ jobs:
           if ($result -eq 0) { throw 'The unpatched backend unexpectedly passed' }
           if (!(Select-String -Path baseline.log -SimpleMatch '[PASS] sent byte' -Quiet)) { throw 'Baseline did not reach the regression' }
           if (!(Select-String -Path baseline.log -SimpleMatch '[FAIL] group wait timed out' -Quiet)) { throw 'Baseline did not show the expected lost read notification' }
+          exit 0
       - name: Rebuild with fix
         shell: pwsh
         run: |
