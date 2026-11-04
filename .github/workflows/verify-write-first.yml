@@ -1,0 +1,63 @@
+name: Verify Windows write-first socket regression
+on:
+  push:
+    branches: [verify/windows-write-first]
+permissions:
+  contents: read
+jobs:
+  regression:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Configure Visual Studio environment
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          cmd /c "`"$devcmd`" -arch=${{ matrix.arch }} -host_arch=${{ matrix.arch }} && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          }
+      - name: Build baseline with regression only
+        shell: pwsh
+        run: |
+          git checkout 2078b9d4a2853b8b07a61e3d460e9dfd9d3c3454 -- src/event/event_windows.c
+          cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DBUILD_SHARED_LIBS=ON -DENABLE_SWIFT=OFF
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build --target dispatch_io_muxed bsdtestharness
+          exit $LASTEXITCODE
+      - name: Require baseline failure at read after writer cancellation
+        shell: pwsh
+        run: |
+          ctest --test-dir build -R '^dispatch_io_muxed$' --output-on-failure 2>&1 | Tee-Object baseline.log
+          $result = $LASTEXITCODE
+          if ($result -eq 0) { throw 'The unpatched backend unexpectedly passed' }
+          if (!(Select-String -Path baseline.log -SimpleMatch '[PASS] sent byte' -Quiet)) { throw 'Baseline did not reach the regression' }
+          if (!(Select-String -Path baseline.log -SimpleMatch '[FAIL] group wait timed out' -Quiet)) { throw 'Baseline did not show the expected lost read notification' }
+      - name: Rebuild with fix
+        shell: pwsh
+        run: |
+          git restore --source=HEAD -- src/event/event_windows.c
+          cmake --build build --target dispatch_io_muxed bsdtestharness
+          exit $LASTEXITCODE
+      - name: Require patched regression to pass
+        shell: pwsh
+        run: ctest --test-dir build -R '^dispatch_io_muxed$' --output-on-failure
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: write-first-${{ matrix.arch }}
+          path: |
+            baseline.log
+            build/Testing/Temporary/LastTest.log
